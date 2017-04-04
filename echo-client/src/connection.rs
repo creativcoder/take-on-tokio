@@ -20,7 +20,13 @@ use std::time::Duration;
 use futures::IntoFuture;
 use tokio_timer::Timer;
 
+use futures::task::park;
+
+use tokio_timer::Interval;
+
 pub struct Connection;
+
+use futures::future::{ok, loop_fn, FutureResult, Loop};
 
 impl Connection {
     pub fn start(addr: String) -> Result<Sender<String>, Error> {
@@ -32,6 +38,7 @@ impl Connection {
     fn run(addr: &str, command_rx: Receiver<String>) -> Result<(), Error> {
         let addr: SocketAddr = addr.parse()?;
         let mut reactor = Core::new()?;
+
         let tcp = TcpStream::connect(&addr, &reactor.handle());
         let handle = reactor.handle();
         let addr = addr.clone();
@@ -46,25 +53,26 @@ impl Connection {
 
             // Future which responds to messages by the client
             let receiver_future = network_receiver.for_each(|msg| {
-                    println!("REPLY: {:?}", msg);
-                    Ok(())
-                }).map_err(|e| Error::Io(e));
+                match msg.as_str() {
+                    "PING" => {
+                        println!("PING_RESPONSE : {:?}", msg);
+                    }
+                    _ => {
+                        println!("Command {:?}", msg);
+                    }
+                }
+                Ok(())
+            }).map_err(|e| Error::Io(e));
 
             // Future which takes messages from client and forwards them to the tcp connection Sink
             let client_to_tcp = command_rx.map_err(|_| Error::Line)
                 .and_then(|p| Ok(p))
                 .forward(network_sender);
 
-            // Timer future that sends timely ping messages to the tcp server
-            let ping_timer = Timer::default().interval(Duration::from_millis(1000));
 
-            let ping_sequence = ping_timer.for_each(|_| {
-                println!("need to send ping");
-                Ok(())
-            }).map_err(|e| Error::Line);
-
-            receiver_future.join3(client_to_tcp, ping_sequence).map_err(|e| Error::Line)
+            receiver_future.join(client_to_tcp).map_err(|e| Error::Line)
         });
+
 
         let _ = reactor.run(client);
         println!("@@@@@@@@@@@@@@@@@@@@");
@@ -77,6 +85,7 @@ pub struct LineStream {
     last_ping: Instant,
     handle: Handle,
     addr: SocketAddr,
+    ping_timer: Interval
 }
 
 impl LineStream {
@@ -86,6 +95,7 @@ impl LineStream {
             last_ping: Instant::now(),
             handle: handle,
             addr: addr,
+            ping_timer: Timer::default().interval(Duration::from_millis(5000))
         }
     }
 }
@@ -98,25 +108,71 @@ impl Stream for LineStream {
         loop {
             match try_ready!(self.inner.poll()) {
                 Some(m) => {
-                    println!("***************");
+                    // send pings to the server
+                    match self.ping_timer.poll() {
+                        Ok(Async::Ready(m)) => {
+                            let res = self.inner.start_send("PING".to_string())?;
+                            assert!(res.is_ready());
+                            self.inner.poll_complete()?;
+                        },
+                        Ok(Async::NotReady) => {}
+                        Err(timer_err) => {println!("{:?}", timer_err);}
+                    }
+                    
                     return Ok(Async::Ready(Some(m)));
                 }
                 None => {
                     println!("Disconnected.");
-                    // let mut stream = TcpStream::connect(&self.addr, &self.handle);
-                    // let stream = try_ready!(stream.poll());
-                    let stream = match ::std::net::TcpStream::connect(&self.addr) {
-                        Ok(s) => s,
-                        // Returning Ok(Async::NotReady) causes the event loop to halt
-                        // so we loop here
-                        Err(_) => return Ok(Async::NotReady)
-                    };
 
-                    let stream = TcpStream::from_stream(stream, &self.handle);
-                    let stream = try_ready!(stream.into_future().poll());
-                    println!("Connected");
-                    let framed = stream.framed(LineCodec);
-                    mem::replace(&mut self.inner, framed);
+                    let tcp = TcpStream::connect(&self.addr, &self.handle);
+                    let mut a = tcp.and_then(|conn|{
+                        let framed = conn.framed(LineCodec);
+                        mem::replace(&mut self.inner, framed);
+                        Ok(())
+                    });
+
+                    match a.poll() {
+                        Ok(Async::Ready(m)) => {
+                            println!("Connected again");
+                        }
+                        Ok(Async::NotReady) => {
+                            println!("NotReady");
+                        }
+                        Err(_) => {
+                            println!("Some errror");
+                        }
+                    }
+                    // let mut t = TcpStream::connect(&self.addr, &self.handle).and_then(|conn|{
+                    //     let framed = conn.framed(LineCodec);
+
+                    // });
+                    // self.handle.spawn(ok::<(), ()>(()));
+                    // let stream = match t.poll() {
+                    //     Ok(Async::Ready(t)) => {
+                    //         println!("Got connection");
+                    //         t
+                    //     },
+                    //     Ok(Async::NotReady) => {
+                    //         println!("NotReady");
+                    //         return Ok(Async::NotReady);
+                    //     },
+                    //     _ => {
+                    //         // continue;
+                    //         println!("Err");
+                    //         return Ok(Async::NotReady);
+                    //     }
+                    // };
+                    // let stream = match ::std::net::TcpStream::connect(&self.addr) {
+                    //     Ok(s) => s,
+                    //     Err(_) => continue
+                    // };
+
+                    // let stream = TcpStream::from_stream(stream, &self.handle);
+                    // let stream = try_ready!(stream.into_future().poll());
+
+                    //println!("Connected");
+                    //let framed = stream.framed(LineCodec);
+                    //mem::replace(&mut self.inner, framed);
                 }
             }
         }

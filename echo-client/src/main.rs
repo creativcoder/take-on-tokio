@@ -6,6 +6,7 @@ extern crate futures;
 extern crate tokio_io;
 extern crate bytes;
 extern crate tokio_timer;
+extern crate mio;
 
 use std::thread;
 use std::time::Duration;
@@ -24,11 +25,12 @@ fn main() {
 
     for i in 0..100 {
         let message = format!("{}. hello", i);
+        // if let Ok(mq_command) = mq_command.clone().send(message).wait() {
+
+        // }
         mq_command = mq_command.send(message).wait().unwrap();
         thread::sleep(Duration::new(1, 0));
     }
 
-
-    
     println!("Hello, world!");
 }

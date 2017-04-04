@@ -13,7 +13,10 @@ def handle(connection, address):
                 logger.debug("Socket closed remotely")
                 break
             logger.debug("Received data %r", data)
-            connection.sendall(data)
+            if 'PING' in data:
+                connection.sendall(b"PINGRESP")
+            else:
+                connection.sendall(data)
             logger.debug("Sent data")
     except:
         logger.exception("Problem handling request")
